@@ -90,7 +90,6 @@ def validate_xbl_token(token):
                 return False
             user_info = profile_users[0]
             xuid = user_info.get("id")
-            # Get gamertag from settings with id == Gamertag
             settings = user_info.get("settings", [])
             gamertag = None
             for s in settings:
@@ -165,10 +164,10 @@ def paid_feature_2():
     input("Overpowered paid feature 2 placeholder (press Enter to go back)")
 
 def check_token_expiry():
+    global xbl_token, xuid, gamertag, paid_user, token_auth_time
     if token_auth_time:
         elapsed = time.time() - token_auth_time
         if elapsed > TOKEN_VALIDITY_SECONDS:
-            global xbl_token, xuid, gamertag, paid_user, token_auth_time
             xbl_token = None
             xuid = None
             gamertag = None
