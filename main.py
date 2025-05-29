@@ -3,11 +3,6 @@ import time
 import os
 import sys
 
-PAID_KEYS = {
-    "EXAMPLE-KEY-1234": True,
-    "ANOTHER-KEY-5678": True
-}
-
 TOKEN_VALIDITY_SECONDS = 13 * 3600
 
 xbl_token = None
@@ -43,7 +38,23 @@ def print_header(menu_title):
             print("Token expired - not authenticated")
     else:
         print("Not authenticated")
+    if paid_user:
+        print("Paid features: Unlocked")
+    else:
+        print("Paid features: Locked")
     print()
+
+def encode_key(machine_id, secret="Pay2RespondSecret"):
+    secret_codes = [ord(c) + 1 for c in secret]
+    encoded_chars = []
+    for i, c in enumerate(machine_id):
+        code = ord(c) + secret_codes[i % len(secret_codes)]
+        encoded_chars.append(str(code))
+    return "-".join(encoded_chars)
+
+def validate_paid_key(machine_id, user_key):
+    expected_key = encode_key(machine_id)
+    return expected_key == user_key
 
 def input_xbl_token():
     global xbl_token, token_auth_time, xuid, gamertag
@@ -55,7 +66,6 @@ def input_xbl_token():
             time.sleep(1.5)
             continue
 
-        # Validate token and fetch user data
         success = validate_xbl_token(token)
         if success:
             xbl_token = token
@@ -66,33 +76,29 @@ def input_xbl_token():
             time.sleep(2)
 
 def validate_xbl_token(token):
-    # Extract the token string after "XBL3.0 x="
     auth_token = token[len("XBL3.0 x="):]
     headers = {
         "Authorization": f"XBL3.0 x={auth_token}"
     }
     try:
-        # Get user XUID first from XSTS token exchange endpoint
-        # Since user gives token directly, use peoplehub to get user info
-
-        # Call peoplehub to get user info - users/me
         response = requests.get("https://peoplehub.xboxlive.com/users/me/profile/settings", headers=headers, timeout=8)
-
         if response.status_code == 200:
             data = response.json()
             global xuid, gamertag
-            # The peoplehub returns "profileUsers" list
             profile_users = data.get("profileUsers", [])
             if not profile_users:
                 return False
             user_info = profile_users[0]
             xuid = user_info.get("id")
-            gamertag = user_info.get("settings", [{}])[0].get("value", "Unknown")  # Might need adjustment
-
-            # If any are missing, fail validation
+            # Get gamertag from settings with id == Gamertag
+            settings = user_info.get("settings", [])
+            gamertag = None
+            for s in settings:
+                if s.get("id") == "Gamertag":
+                    gamertag = s.get("value")
+                    break
             if not xuid or not gamertag:
                 return False
-
             return True
         else:
             return False
@@ -103,20 +109,19 @@ def input_paid_key():
     global paid_user
     while True:
         print_header("Paid Features")
-        choice = input("Do you have a paid key? (y/n): ").strip().lower()
-        if choice == "y":
-            key = input("Enter paid key: ").strip()
-            if PAID_KEYS.get(key):
-                paid_user = True
-                print("Paid features unlocked.")
-                time.sleep(1)
-                return
-            else:
-                print("Invalid key.")
-                time.sleep(1)
-        elif choice == "n":
-            paid_user = False
+        machine_id = input("Enter your machine ID (unique identifier): ").strip()
+        user_key = input("Enter your paid key: ").strip()
+        if validate_paid_key(machine_id, user_key):
+            paid_user = True
+            print("Paid features unlocked.")
+            time.sleep(1)
             return
+        else:
+            print("Invalid key. Try again or press Enter to continue without paid features.")
+            choice = input("(y to retry, any other key to skip): ").strip().lower()
+            if choice != 'y':
+                paid_user = False
+                return
 
 def main_menu():
     while True:
@@ -178,9 +183,6 @@ def main():
     while True:
         if not xbl_token:
             input_xbl_token()
-            if not validate_xbl_token(xbl_token):
-                print("Authentication failed. Try again.")
-                continue
             input_paid_key()
         else:
             if not check_token_expiry():
