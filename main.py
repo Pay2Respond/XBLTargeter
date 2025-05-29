@@ -1,220 +1,191 @@
 import requests
-import os
 import time
-import threading
-import base64
-import socket
-import platform
+import os
 import sys
 
-def clear():
+PAID_KEYS = {
+    "EXAMPLE-KEY-1234": True,
+    "ANOTHER-KEY-5678": True
+}
+
+TOKEN_VALIDITY_SECONDS = 13 * 3600
+
+xbl_token = None
+xuid = None
+gamertag = None
+token_auth_time = None
+paid_user = False
+
+def clear_screen():
     os.system('cls' if os.name == 'nt' else 'clear')
-
-def obscure_secret():
-    return [81, 98, 122, 51, 83, 102, 116, 113, 112, 111, 101, 84, 102, 100, 115, 102, 117]
-
-def deobscure_secret(codes):
-    return "".join(chr(c - 1) for c in codes)
-
-def xor_encrypt_decrypt(data, key):
-    return ''.join(chr(ord(c) ^ ord(key[i % len(key)])) for i, c in enumerate(data))
-
-def machine_fingerprint():
-    return f"{socket.gethostname()}_{platform.node()}_{platform.machine()}"
-
-def validate_key(input_key):
-    mf = machine_fingerprint()
-    secret = deobscure_secret(obscure_secret())
-    expected = base64.urlsafe_b64encode(xor_encrypt_decrypt(mf, secret).encode()).decode()
-    return input_key.strip() == expected
 
 def rainbow_text(text):
     colors = [
-        '\033[91m', '\033[93m', '\033[92m', '\033[96m',
-        '\033[94m', '\033[95m', '\033[91m'
+        '\033[91m', '\033[93m', '\033[92m', '\033[96m', '\033[94m', '\033[95m'
     ]
     reset = '\033[0m'
     result = ''
     for i, c in enumerate(text):
         result += colors[i % len(colors)] + c
-    return result + reset
+    result += reset
+    return result
 
-def print_header(menu_title, token_status, gamertag, time_left, paid):
-    clear()
-    print(rainbow_text(f"=== XBL Targeter - {menu_title} ==="))
-    print(f"Credits: Pay2Respond | Discord: Pay2Respond#0000 | GitHub: Pay2Respond | TikTok: Pay2Respond")
-    print(f"Token Status: {token_status} | Gamertag: {gamertag if gamertag else 'N/A'} | Token expires in: {time_left}")
-    print(f"Paid Features: {'Unlocked' if paid else 'Locked'}")
-    print("=" * 50)
+def print_header(menu_title):
+    clear_screen()
+    print(rainbow_text(f"=== XBL Targeter ==="))
+    print(rainbow_text(f"Menu: {menu_title}"))
+    print("Credits: Pay2Respond | Discord: Pay2Respond | Github: Pay2Respond | TikTok: Pay2Respond")
+    if xbl_token and token_auth_time:
+        remaining = TOKEN_VALIDITY_SECONDS - (time.time() - token_auth_time)
+        if remaining > 0:
+            print(f"Authenticated: {gamertag} (XUID: {xuid}) | Token expires in: {int(remaining // 60)} minutes")
+        else:
+            print("Token expired - not authenticated")
+    else:
+        print("Not authenticated")
     print()
 
-def get_xsts_token(xbl_token):
-    url = "https://xsts.auth.xboxlive.com/xsts/authorize"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "Properties": {
-            "SandboxId": "RETAIL",
-            "UserTokens": [xbl_token]
-        },
-        "RelyingParty": "http://xboxlive.com",
-        "TokenType": "JWT"
-    }
-    r = requests.post(url, json=payload, headers=headers)
-    if r.status_code == 200:
-        return r.json().get("Token"), r.json().get("DisplayClaims", {}).get("xui", [{}])[0].get("xid")
-    return None, None
-
-def get_user_info(xuid, xsts_token):
-    url = f"https://peoplehub.xboxlive.com/users/me/people/xuids({xuid})/decoration/detail,preferredColor,presenceDetail"
-    headers = {
-        "x-xbl-contract-version": "2",
-        "Authorization": f"XBL3.0 x={xuid};{xsts_token}"
-    }
-    r = requests.get(url, headers=headers)
-    if r.status_code == 200:
-        data = r.json()
-        if data.get("people"):
-            p = data["people"][0]
-            display_name = p.get("DisplayName", "N/A")
-            presence = p.get("presenceDetail", {}).get("state", "Unknown")
-            gamerscore = p.get("gamerscore", "N/A")
-            return display_name, presence, gamerscore
-    return None, None, None
-
-def input_token_loop():
+def input_xbl_token():
+    global xbl_token, token_auth_time, xuid, gamertag
     while True:
-        clear()
-        print(rainbow_text("=== XBL Targeter - Enter XBL 3.0 Token ==="))
-        token = input("Type your XBL 3.0 Token (starting with 'XBL3.0 x='): ").strip()
+        print_header("Please input your XBL3.0 token")
+        token = input("XBL3.0 Token (must start with 'XBL3.0 x='): ").strip()
         if not token.startswith("XBL3.0 x="):
-            print("Invalid format. Token must start with 'XBL3.0 x='.")
-            time.sleep(2)
+            print("Invalid token format. Try again.")
+            time.sleep(1.5)
             continue
 
-        xbl_token = token[len("XBL3.0 x="):].split(";")[1] if ";" in token[len("XBL3.0 x="):] else token[len("XBL3.0 x="):]
-
-        xsts_token, xuid = get_xsts_token(xbl_token)
-        if xsts_token and xuid:
-            display_name, presence, gamerscore = get_user_info(xuid, xsts_token)
-            if display_name:
-                return token, xsts_token, xuid, display_name, presence, gamerscore
-            else:
-                print("Failed to retrieve user info. Try again.")
-                time.sleep(2)
+        # Validate token and fetch user data
+        success = validate_xbl_token(token)
+        if success:
+            xbl_token = token
+            token_auth_time = time.time()
+            break
         else:
-            print("Failed to validate token. Try again.")
+            print("Token validation failed. Try again.")
             time.sleep(2)
 
-def countdown_timer(expiry_seconds, stop_event):
-    start = time.time()
-    while not stop_event.is_set():
-        elapsed = time.time() - start
-        left = max(0, int(expiry_seconds - elapsed))
-        mins, secs = divmod(left, 60)
-        hours, mins = divmod(mins, 60)
-        time_left = f"{hours:02d}:{mins:02d}:{secs:02d}"
-        yield time_left
-        time.sleep(1)
+def validate_xbl_token(token):
+    # Extract the token string after "XBL3.0 x="
+    auth_token = token[len("XBL3.0 x="):]
+    headers = {
+        "Authorization": f"XBL3.0 x={auth_token}"
+    }
+    try:
+        # Get user XUID first from XSTS token exchange endpoint
+        # Since user gives token directly, use peoplehub to get user info
 
-def prompt_paid_key():
-    clear()
-    print(rainbow_text("=== XBL Targeter - Paid Key ==="))
-    yn = input("Do you have a paid key? (y/n): ").strip().lower()
-    if yn == 'y':
-        key = input("Enter your paid key: ").strip()
-        if validate_key(key):
+        # Call peoplehub to get user info - users/me
+        response = requests.get("https://peoplehub.xboxlive.com/users/me/profile/settings", headers=headers, timeout=8)
+
+        if response.status_code == 200:
+            data = response.json()
+            global xuid, gamertag
+            # The peoplehub returns "profileUsers" list
+            profile_users = data.get("profileUsers", [])
+            if not profile_users:
+                return False
+            user_info = profile_users[0]
+            xuid = user_info.get("id")
+            gamertag = user_info.get("settings", [{}])[0].get("value", "Unknown")  # Might need adjustment
+
+            # If any are missing, fail validation
+            if not xuid or not gamertag:
+                return False
+
             return True
         else:
-            print("Invalid key.")
-            time.sleep(2)
             return False
-    return False
+    except Exception:
+        return False
 
-def main_menu(paid):
-    menu_title = "Main Menu"
-    options = [
-        "1. Party Tools",
-        "2. Account Tools",
-        "3. Paid Features",
-        "4. Exit"
-    ]
+def input_paid_key():
+    global paid_user
     while True:
-        print_header(menu_title, "Authenticated", gamertag, token_time_left, paid)
-        for option in options:
-            if option.startswith("3.") and not paid:
-                print(option + " [Locked]")
+        print_header("Paid Features")
+        choice = input("Do you have a paid key? (y/n): ").strip().lower()
+        if choice == "y":
+            key = input("Enter paid key: ").strip()
+            if PAID_KEYS.get(key):
+                paid_user = True
+                print("Paid features unlocked.")
+                time.sleep(1)
+                return
             else:
-                print(option)
-        choice = input("\nSelect option: ").strip()
+                print("Invalid key.")
+                time.sleep(1)
+        elif choice == "n":
+            paid_user = False
+            return
+
+def main_menu():
+    while True:
+        print_header("Main Menu")
+        print("1. Party Tools")
+        print("2. Account Tools")
+        if paid_user:
+            print("3. Overpowered Paid Feature 1")
+            print("4. Overpowered Paid Feature 2")
+        print("0. Exit")
+        choice = input("Select option: ").strip()
         if choice == "1":
-            party_tools_menu(paid)
+            party_tools()
         elif choice == "2":
-            account_tools_menu(paid)
-        elif choice == "3":
-            if paid:
-                paid_features_menu()
-            else:
-                print("Paid features locked. Get a key from Pay2Respond on Discord.")
-                time.sleep(2)
-        elif choice == "4":
-            print("Exiting...")
-            sys.exit()
+            account_tools()
+        elif paid_user and choice == "3":
+            paid_feature_1()
+        elif paid_user and choice == "4":
+            paid_feature_2()
+        elif choice == "0":
+            print("Goodbye.")
+            sys.exit(0)
         else:
-            print("Invalid choice.")
+            print("Invalid choice. Try again.")
             time.sleep(1)
 
-def party_tools_menu(paid):
-    menu_title = "Party Tools"
-    while True:
-        print_header(menu_title, "Authenticated", gamertag, token_time_left, paid)
-        print("Party tools coming soon...")
-        print("0. Back to main menu")
-        choice = input("Select option: ").strip()
-        if choice == "0":
-            return
+def party_tools():
+    print_header("Party Tools")
+    input("Party tools placeholder (press Enter to go back)")
 
-def account_tools_menu(paid):
-    menu_title = "Account Tools"
-    while True:
-        print_header(menu_title, "Authenticated", gamertag, token_time_left, paid)
-        print(f"Gamertag: {gamertag}")
-        print(f"Presence: {presence}")
-        print(f"Gamerscore: {gamerscore}")
-        print("0. Back to main menu")
-        choice = input("Select option: ").strip()
-        if choice == "0":
-            return
+def account_tools():
+    print_header("Account Tools")
+    input("Account tools placeholder (press Enter to go back)")
 
-def paid_features_menu():
-    menu_title = "Paid Features"
+def paid_feature_1():
+    print_header("Paid Feature 1")
+    input("Overpowered paid feature 1 placeholder (press Enter to go back)")
+
+def paid_feature_2():
+    print_header("Paid Feature 2")
+    input("Overpowered paid feature 2 placeholder (press Enter to go back)")
+
+def check_token_expiry():
+    if token_auth_time:
+        elapsed = time.time() - token_auth_time
+        if elapsed > TOKEN_VALIDITY_SECONDS:
+            global xbl_token, xuid, gamertag, paid_user, token_auth_time
+            xbl_token = None
+            xuid = None
+            gamertag = None
+            paid_user = False
+            token_auth_time = None
+            print("\nToken expired. Please authenticate again.")
+            time.sleep(2)
+            return False
+    return True
+
+def main():
     while True:
-        print_header(menu_title, "Authenticated", gamertag, token_time_left, True)
-        print("Paid features coming soon...")
-        print("0. Back to main menu")
-        choice = input("Select option: ").strip()
-        if choice == "0":
-            return
+        if not xbl_token:
+            input_xbl_token()
+            if not validate_xbl_token(xbl_token):
+                print("Authentication failed. Try again.")
+                continue
+            input_paid_key()
+        else:
+            if not check_token_expiry():
+                continue
+        main_menu()
 
 if __name__ == "__main__":
-    token, xsts_token, xuid, gamertag, presence, gamerscore = None, None, None, None, None, None
-    token_expiry_seconds = 13 * 3600
-    stop_timer = threading.Event()
-
-    while True:
-        token, xsts_token, xuid, gamertag, presence, gamerscore = input_token_loop()
-        token_time_left = "13:00:00"
-        paid = False
-        if prompt_paid_key():
-            paid = True
-
-        stop_timer.clear()
-        def timer_thread():
-            global token_time_left
-            for t_left in countdown_timer(token_expiry_seconds, stop_timer):
-                token_time_left = t_left
-                if t_left == "00:00:00":
-                    stop_timer.set()
-                    break
-
-        threading.Thread(target=timer_thread, daemon=True).start()
-        main_menu(paid)
+    main()
