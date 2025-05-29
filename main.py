@@ -1,93 +1,190 @@
-from time import time
+import time
+import threading
+import requests
 from rich.console import Console
-from rich.prompt import Prompt
 from rich.panel import Panel
-from rich.live import Live
-from xbltargeter.auth import validate_token, validate_license_key, get_gamer_tag
-from xbltargeter.ui import render_header, render_menu, render_error, render_message
-from xbltargeter.paid import is_paid_user
+from rich.prompt import Prompt
+from rich.align import Align
+from rich.text import Text
+
+from xbltargeter.party import party_menu
+from xbltargeter.account import account_menu
+from xbltargeter.ui import render_error, render_message
 
 console = Console()
 
-def main():
-    console.clear()
-    console.rule("[bold magenta]XBL Targeter[/bold magenta]")
-    console.print("[green]Credits:[/] Pay2Respond\n")
+XBL_VALIDATE_URL = "https://user.auth.xboxlive.com/user/authenticate"
+XSTS_AUTH_URL = "https://xsts.auth.xboxlive.com/xsts/authorize"
+RELYING_PARTY = "http://auth.xboxlive.com"
 
-    token = None
-    license_key = None
-    gamer_tag = None
-    token_start = None
-    token_expiry = 300
+XBL_TOKEN = None
+GAMERTAG = None
+TOKEN_EXPIRES_AT = None
+TOKEN_TIMER_RUNNING = False
 
-    while True:
-        token_input = Prompt.ask("Enter your XPL 3.0 token")
-        if validate_token(token_input):
-            token = token_input
-            gamer_tag = get_gamer_tag(token)
-            token_start = time()
-            break
-        else:
-            render_error("Invalid token, try again")
 
-    while True:
-        key_input = Prompt.ask("Enter license key (or leave blank for free mode)").strip()
-        if key_input == "":
-            license_key = None
-            break
-        if validate_license_key(key_input):
-            license_key = key_input
-            break
-        render_error("Invalid license key")
-
-    paid = is_paid_user(license_key)
-
-    menu_options = {
-        "1": "Party Tools",
-        "2": "Account Tools",
-        "3": "Advanced Party Control",
-        "4": "Enhanced Account Mods",
-        "5": "Help & About",
-        "q": "Quit"
+def validate_xbl_token(token: str):
+    payload = {
+        "Properties": {
+            "AuthMethod": "RPS",
+            "SiteName": "user.auth.xboxlive.com",
+            "RpsTicket": f"t={token}"
+        },
+        "RelyingParty": RELYING_PARTY,
+        "TokenType": "JWT"
     }
+    try:
+        r = requests.post(XBL_VALIDATE_URL, json=payload, timeout=6)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except requests.RequestException:
+        return None
 
-    with Live(refresh_per_second=4, console=console) as live:
-        while True:
-            elapsed = int(time() - token_start)
-            remaining = max(token_expiry - elapsed, 0)
 
-            header = render_header(token, gamer_tag, remaining, paid)
-            menu = render_menu(menu_options)
+def get_xsts_token(user_token: str):
+    payload = {
+        "Properties": {
+            "SandboxId": "RETAIL",
+            "UserTokens": [user_token]
+        },
+        "RelyingParty": RELYING_PARTY,
+        "TokenType": "JWT"
+    }
+    try:
+        r = requests.post(XSTS_AUTH_URL, json=payload, timeout=6)
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except requests.RequestException:
+        return None
 
-            live.update(Panel(header + "\n\n" + menu, border_style="bright_magenta"))
 
-            choice = Prompt.ask("Choose option", choices=list(menu_options.keys()))
+def format_timer():
+    if TOKEN_EXPIRES_AT is None:
+        return "N/A"
+    remaining = TOKEN_EXPIRES_AT - int(time.time())
+    if remaining <= 0:
+        return "Expired"
+    m, s = divmod(remaining, 60)
+    h, m = divmod(m, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
-            if choice == "q":
+
+def start_token_timer(expiry):
+    global TOKEN_EXPIRES_AT, TOKEN_TIMER_RUNNING
+    TOKEN_EXPIRES_AT = expiry
+    TOKEN_TIMER_RUNNING = True
+
+    def timer_loop():
+        global TOKEN_TIMER_RUNNING
+        while TOKEN_TIMER_RUNNING:
+            if TOKEN_EXPIRES_AT - int(time.time()) <= 0:
+                TOKEN_TIMER_RUNNING = False
                 break
-            elif choice == "1":
-                from xbltargeter.party import party_menu
-                party_menu(token)
-            elif choice == "2":
-                from xbltargeter.account import account_menu
-                account_menu(token)
-            elif choice == "3":
-                if paid:
-                    from xbltargeter.paid import advanced_party_menu
-                    advanced_party_menu(token)
-                else:
-                    render_error("Paid feature - License required")
-            elif choice == "4":
-                if paid:
-                    from xbltargeter.paid import enhanced_account_menu
-                    enhanced_account_menu(token)
-                else:
-                    render_error("Paid feature - License required")
-            elif choice == "5":
-                from xbltargeter.ui import help_menu
-                help_menu()
+            time.sleep(1)
 
-    console.print("Exiting XBL Targeter. Goodbye!")
+    threading.Thread(target=timer_loop, daemon=True).start()
+
+
+def render_header(menu_title):
+    console.clear()
+    title = Text("XBL Targeter", style="bold magenta")
+    credits = Text("Pay2Respond (Discord | GitHub | TikTok)", style="bold cyan")
+    token_text = Text.assemble(
+        ("GamerTag: ", "bold green"), (GAMERTAG or "Not authenticated", "yellow"), "\n",
+        ("XBL Token: ", "bold green"), (XBL_TOKEN or "None", "yellow"), "\n",
+        ("Expires in: ", "bold green"), (format_timer(), "red" if format_timer() == "Expired" else "white")
+    )
+    console.print(Panel(Align.center(title), style="bright_blue"))
+    console.print(Align.center(credits))
+    console.print(Panel(token_text, style="bright_black"))
+    console.print(Panel(Align.center(f"[bold underline]{menu_title}[/bold underline]"), style="bright_magenta"))
+
+
+def prompt_token():
+    global XBL_TOKEN, GAMERTAG, TOKEN_TIMER_RUNNING
+
+    while True:
+        render_header("Token Authorization")
+        token = Prompt.ask("Enter your XBL 3.0 token")
+        if not token or len(token) < 20:
+            render_error("Invalid token format, try again.")
+            time.sleep(2)
+            continue
+
+        validation = validate_xbl_token(token)
+        if validation is None:
+            render_error("Token validation failed, try again.")
+            time.sleep(2)
+            continue
+
+        claims = validation.get("DisplayClaims", {}).get("xui", [{}])[0]
+        gamertag = claims.get("gtg") or claims.get("gt")
+        if not gamertag:
+            render_error("Failed to retrieve gamer tag, try again.")
+            time.sleep(2)
+            continue
+
+        expires_str = validation.get("NotAfter")
+        if expires_str is None:
+            render_error("Failed to get token expiration, try again.")
+            time.sleep(2)
+            continue
+
+        # parse expiration ISO8601 time to epoch seconds
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(expires_str, "%Y-%m-%dT%H:%M:%S.%fZ")
+            expires_epoch = int(dt.timestamp())
+        except Exception:
+            render_error("Failed to parse token expiration, try again.")
+            time.sleep(2)
+            continue
+
+        if expires_epoch <= int(time.time()):
+            render_error("Token already expired, try again.")
+            time.sleep(2)
+            continue
+
+        XBL_TOKEN = token
+        GAMERTAG = gamertag
+        TOKEN_TIMER_RUNNING = False
+        start_token_timer(expires_epoch)
+        break
+
+
+def main_menu():
+    while True:
+        render_header("Main Menu")
+        console.print("1) Party Tools")
+        console.print("2) Account Tools")
+        console.print("3) Exit")
+        choice = Prompt.ask("Select an option", choices=["1", "2", "3"])
+
+        if choice == "1":
+            try:
+                party_menu(XBL_TOKEN)
+            except Exception as e:
+                render_error(f"Party Tools error: {e}")
+                time.sleep(2)
+        elif choice == "2":
+            try:
+                account_menu(XBL_TOKEN)
+            except Exception as e:
+                render_error(f"Account Tools error: {e}")
+                time.sleep(2)
+        elif choice == "3":
+            global TOKEN_TIMER_RUNNING
+            TOKEN_TIMER_RUNNING = False
+            break
+
+        if TOKEN_EXPIRES_AT and TOKEN_EXPIRES_AT <= int(time.time()):
+            render_message("Token expired. Re-authorizing...")
+            time.sleep(2)
+            prompt_token()
+
 
 if __name__ == "__main__":
-    main()
+    prompt_token()
+    main_menu()
